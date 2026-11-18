@@ -385,6 +385,7 @@ export async function handleRest(ctx: Ctx, req: IncomingMessage, res: ServerResp
     if (!ref.startsWith('refs/heads/') || !repo.objects.has(sha)) return err(422, 'Validation Failed: ref or sha is invalid');
     if (repo.refs.has(ref)) return err(422, 'Reference already exists');
     repo.refs.set(ref, sha);
+    repo.bumpGeneration();
     return json(201, { ref, node_id: Buffer.from(`Ref:${ref}`, 'utf8').toString('base64url'), url: `/api/v3/repos/${repo.fullName}/git/refs/${ref}`, object: { sha, type: 'commit', url: `/api/v3/repos/${repo.fullName}/git/commits/${sha}` } });
   }
   const refMatch = /^git\/refs\/(.+)$/.exec(rest);

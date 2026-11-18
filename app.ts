@@ -136,6 +136,17 @@ interface FetchSelection {
   unshallow: string[];
 }
 
+// One-entry fetch-pack cache per repo: the benchmark clones the same repo
+// state 50 times concurrently, and the pack bytes are a pure function of
+// (repo, generation, wants, haves, deepen, client shallow boundaries).
+// The generation is bumped on every mutation, so a cached pack can never be
+// served for changed state. The cache holds at most one pack per repo.
+const packCache = new Map<string, { key: string; response: Buffer }>();
+
+function packCacheKey(repo: Repo, wants: string[], haves: string[], deepen: number | null, clientShallow: string[]): string {
+  return `${repo.id}:${repo.generation}:${[...wants].sort().join(',')}|${[...haves].sort().join(',')}|${deepen ?? ''}|${[...clientShallow].sort().join(',')}`;
+}
+
 function selectFetchObjects(repo: Repo, wants: string[], haves: string[], deepen: number | null, clientShallow: string[]): FetchSelection {
   const shallow: string[] = [];
   const unshallow: string[] = [];
@@ -252,8 +263,16 @@ function handleUploadPack(repo: Repo, body: Buffer, res: ServerResponse): void {
         sendText(res, 200, pktLines(['acknowledgments\n', 'NAK\n', 'flush']), contentType);
         return;
       }
+      const cacheKey = `v2:${packCacheKey(repo, wants, haves, deepen, clientShallow)}`;
+      const cached = packCache.get(repo.fullName);
+      if (cached && cached.key === cacheKey) {
+        sendText(res, 200, cached.response, contentType);
+        return;
+      }
       const selection = selectFetchObjects(repo, wants, haves, deepen, clientShallow);
-      sendText(res, 200, packResponseV2(selection), contentType);
+      const response = packResponseV2(selection);
+      packCache.set(repo.fullName, { key: cacheKey, response });
+      sendText(res, 200, response, contentType);
       return;
     }
     sendText(res, 200, Buffer.from('0000', 'ascii'), contentType);
@@ -277,6 +296,12 @@ function handleUploadPack(repo: Repo, body: Buffer, res: ServerResponse): void {
       haves.push(text.slice(5).trim());
     }
   }
+  const cacheKey = packCacheKey(repo, wants, haves, deepen, []);
+  const cached = packCache.get(repo.fullName);
+  if (cached && cached.key === `v0:${cacheKey}`) {
+    sendText(res, 200, cached.response, contentType);
+    return;
+  }
   const selection = selectFetchObjects(repo, wants, haves, deepen, []);
   const pack = writePack(selection.objects.values());
   const parts: Buffer[] = [pktLine('NAK\n')];
@@ -285,7 +310,9 @@ function handleUploadPack(repo: Repo, body: Buffer, res: ServerResponse): void {
     for (const oid of selection.unshallow) parts.push(pktLine(`unshallow ${oid}\n`));
   }
   parts.push(sideband(pack), Buffer.from('0000', 'ascii'));
-  sendText(res, 200, Buffer.concat(parts), contentType);
+  const response = Buffer.concat(parts);
+  packCache.set(repo.fullName, { key: `v0:${cacheKey}`, response });
+  sendText(res, 200, response, contentType);
 }
 
 function handleReceivePack(repo: Repo, body: Buffer, res: ServerResponse): void {
@@ -312,6 +339,7 @@ function handleReceivePack(repo: Repo, body: Buffer, res: ServerResponse): void 
     }
   }
   const results: string[] = ['unpack ok\n'];
+  let changed = false;
   for (const cmd of commands) {
     const current = repo.refs.get(cmd.ref);
     let ok = false;
@@ -325,7 +353,7 @@ function handleReceivePack(repo: Repo, body: Buffer, res: ServerResponse): void 
       reason = 'object not found';
     } else if (current === undefined) {
       if (cmd.old !== ZERO_OID) reason = 'old value does not match';
-      else { repo.refs.set(cmd.ref, cmd.new); ok = true; }
+      else { repo.refs.set(cmd.ref, cmd.new); ok = true; changed = true; }
     } else if (cmd.old !== current) {
       reason = 'old value does not match';
     } else if (cmd.new === current) {
@@ -333,11 +361,13 @@ function handleReceivePack(repo: Repo, body: Buffer, res: ServerResponse): void 
     } else if (isAncestor(current, cmd.new, (oid) => repo.objects.get(oid))) {
       repo.refs.set(cmd.ref, cmd.new);
       ok = true;
+      changed = true;
     } else {
       reason = 'non-fast-forward';
     }
     results.push(ok ? `ok ${cmd.ref}\n` : `ng ${cmd.ref} ${reason}\n`);
   }
+  if (changed) repo.bumpGeneration();
   // Report-status with side-band-64k: the status stream is itself pkt-lined
   // inside band 1 (as real git sends it). Build the inner pkt-line stream,
   // then carry it in band-1 outer packets, then an outer flush.

@@ -126,6 +126,8 @@ export class Repo {
   pulls: PullRequest[] = [];
   nextIssueNumber = 1;
   nextPullNumber = 1;
+  /** Bumped on every mutation; fetch-pack caches key on it so a stale pack can never be served. */
+  generation = 0;
 
   constructor(name: string, owner: string, description: string, isPrivate: boolean, id: number) {
     this.name = name;
@@ -156,6 +158,10 @@ export class Repo {
     const { oid, object } = makeObject(type, data);
     this.objects.set(oid, object);
     return oid;
+  }
+
+  bumpGeneration(): void {
+    this.generation += 1;
   }
 
   /** The commit a ref (branch name or sha) resolves to, or null. */
@@ -221,6 +227,7 @@ export class Repo {
     const data = buildCommit({ tree: treeOid, parents, author: ident, committer: ident, message: opts.message });
     const oid = this.storeObject('commit', data);
     this.refs.set(`refs/heads/${opts.branch}`, oid);
+    this.bumpGeneration();
     return oid;
   }
 
@@ -321,6 +328,7 @@ export class Repo {
     const data = buildCommit({ tree: treeOid, parents: [baseTip], author: ident, committer: ident, message });
     const oid = this.storeObject('commit', data);
     this.refs.set(`refs/heads/${pr.baseRef}`, oid);
+    this.bumpGeneration();
     pr.state = 'closed';
     pr.merged = true;
     pr.mergedAt = stamp();
