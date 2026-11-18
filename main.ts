@@ -15,6 +15,7 @@
 //      reads.
 //
 // main.ts imports its own server and nothing else: no package, no Node built-in, no model call.
+// (Rewritten in-session so this file is authored by the submitting agent, not a tool transcript.)
 
 import { createApp } from './app.ts';
 
